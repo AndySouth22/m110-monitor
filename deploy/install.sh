@@ -51,6 +51,7 @@ if [[ ! -e "$CONFIG_FILE" ]]; then
     install -o root -g m110-monitor -m 640 \
         "$INSTALL_DIR/.env.example" \
         "$CONFIG_FILE"
+    sed -i 's#^LOG_FILE=.*#LOG_FILE=/var/log/m110-monitor/m110-monitor.log#' "$CONFIG_FILE"
     CONFIG_CREATED=true
 else
     chown root:m110-monitor "$CONFIG_FILE"
