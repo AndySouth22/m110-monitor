@@ -1,0 +1,34 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+settings.json
+.env
+logs/
+
+# Секретные настройки
+.env
+*.env
+!.env.example
+
+# Виртуальное окружение
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Логи
+logs/
+*.log
+*.log.*
+
+# Редакторы и ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

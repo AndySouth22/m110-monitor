@@ -1,0 +1,24 @@
+[Unit]
+Description=OVEN MV110-8A Modbus Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=m110-monitor
+Group=m110-monitor
+WorkingDirectory=/opt/m110-monitor
+ExecStart=/opt/m110-monitor/.venv/bin/python /opt/m110-monitor/main.py --config /etc/daemons/m110-monitor.env
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/m110-monitor
+
+[Install]
+WantedBy=multi-user.target
