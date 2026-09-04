@@ -22,11 +22,29 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$LOG_DIR"
 install -d -o root -g root -m 755 "$CONFIG_DIR"
-for file in main.py decoder.py database.py requirements.txt README.md .env.example; do
-    cp "$PROJECT_DIR/$file" "$INSTALL_DIR/$file"
-done
-cp -a "$PROJECT_DIR/deploy" "$INSTALL_DIR/"
-python3 -m venv "$INSTALL_DIR/.venv"
+
+if [[ "$PROJECT_DIR" != "$INSTALL_DIR" ]]; then
+    for file in \
+        main.py \
+        decoder.py \
+        database.py \
+        logging_utils.py \
+        requirements.txt \
+        README.md \
+        .env.example
+    do
+        cp "$PROJECT_DIR/$file" "$INSTALL_DIR/$file"
+    done
+    cp -a "$PROJECT_DIR/deploy" "$INSTALL_DIR/"
+fi
+
+PYTHON_BIN="${PYTHON_BIN:-python3.11}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "Не найден Python: $PYTHON_BIN" >&2
+    exit 1
+fi
+
+"$PYTHON_BIN" -m venv "$INSTALL_DIR/.venv"
 "$INSTALL_DIR/.venv/bin/pip" install --requirement "$INSTALL_DIR/requirements.txt"
 
 if [[ ! -e "$CONFIG_FILE" ]]; then
