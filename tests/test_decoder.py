@@ -5,7 +5,7 @@ import pytest
 
 from decoder import Measurement, aggregate_measurements, decode_all_inputs, decode_registers
 from main import aggregate_cycle, format_measurements, read_all_inputs
-from database import LOG_INSERT_SQL, STATUS_UPSERT_SQL, MySQLWriter, database_status_code, status_row
+from mysql_database import LOG_INSERT_SQL, STATUS_UPSERT_SQL, MySQLWriter, database_status_code, status_row
 
 
 def reading(value: float, status: int = 0) -> Measurement:

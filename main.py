@@ -17,7 +17,7 @@ from dotenv import dotenv_values
 from pymodbus.client import ModbusTcpClient
 from pymodbus.framer import FramerType
 
-from database import MySQLWriter
+from mysql_database import MySQLWriter
 from decoder import AggregatedMeasurement, Measurement, aggregate_measurements, decode_all_inputs
 from logging_utils import ConnectionState, RepeatSuppressor, SensorStateTracker
 from outbox import Outbox

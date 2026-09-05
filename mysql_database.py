@@ -1,4 +1,4 @@
-"""Optional MySQL persistence for filtered sensor measurements."""
+"""Запись отфильтрованных показаний МВ110 в старую базу MySQL."""
 
 from __future__ import annotations
 

@@ -28,7 +28,7 @@ if [[ "$PROJECT_DIR" != "$INSTALL_DIR" ]]; then
     for file in \
         main.py \
         decoder.py \
-        database.py \
+        mysql_database.py \
         postgres_database.py \
         outbox.py \
         logging_utils.py \
@@ -40,6 +40,9 @@ if [[ "$PROJECT_DIR" != "$INSTALL_DIR" ]]; then
     done
     cp -a "$PROJECT_DIR/deploy" "$INSTALL_DIR/"
 fi
+
+# Удаляем прежнее неоднозначное имя MySQL-модуля после обновления старой установки.
+rm -f "$INSTALL_DIR/database.py"
 
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
