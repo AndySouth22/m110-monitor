@@ -94,3 +94,37 @@ class MySQLWriter:
             raise
         finally:
             cursor.close()
+
+    def save_payload(self, measurements: list[dict[str, Any]], measured: datetime) -> tuple[int, int]:
+        """Deliver a normalized outbox payload to the legacy schema."""
+        status_rows = []
+        log_rows = []
+        for item in measurements:
+            sensor_id = int(item["sensor_id"])
+            reliable = bool(item.get("reliable")) and item.get("value") is not None
+            value = float(item["value"]) if reliable else None
+            status_rows.append(
+                (
+                    sensor_id,
+                    round(value, 1) if value is not None else None,
+                    0 if reliable else database_status_code(item.get("status")),
+                    measured,
+                )
+            )
+            if value is not None:
+                log_value = round(value * 10)
+                if not -32768 <= log_value <= 32767:
+                    raise ValueError(f"Значение датчика {sensor_id} не помещается в SMALLINT: {log_value}")
+                log_rows.append((sensor_id, measured, log_value))
+        cursor = self.connection.cursor()
+        try:
+            cursor.executemany(STATUS_UPSERT_SQL, status_rows)
+            if log_rows:
+                cursor.executemany(LOG_INSERT_SQL, log_rows)
+            self.connection.commit()
+            return len(status_rows), len(log_rows)
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            cursor.close()

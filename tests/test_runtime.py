@@ -97,6 +97,7 @@ def test_sigterm_handler_sets_stop_event(monkeypatch, tmp_path):
     logger.handlers.clear()
 
 
-def test_no_sqlite_dependency_or_database_path():
-    assert not Path("database.sqlite").exists()
-    assert not Path("/var/lib/m110-monitor").exists()
+def test_postgres_is_opt_in_for_legacy_configs(tmp_path):
+    config = load_config(write_config(tmp_path / "legacy.env"))
+    assert not config.postgres_enabled
+    assert config.outbox_path == tmp_path / "data" / "delivery-outbox.sqlite3"

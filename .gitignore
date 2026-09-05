@@ -5,6 +5,10 @@ __pycache__/
 settings.json
 .env
 logs/
+data/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # Секретные настройки
 .env

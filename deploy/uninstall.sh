@@ -22,7 +22,8 @@ rm -rf /opt/m110-monitor
 if [[ "$PURGE" == true ]]; then
     rm -f /etc/daemons/m110-monitor.env
     rm -rf /var/log/m110-monitor
-    echo "Служба, программа, конфигурация и логи удалены."
+    rm -rf /var/lib/m110-monitor
+    echo "Служба, программа, конфигурация, логи и outbox удалены."
 else
-    echo "Служба и программа удалены. Конфигурация и логи сохранены."
+    echo "Служба и программа удалены. Конфигурация, логи и outbox сохранены."
 fi

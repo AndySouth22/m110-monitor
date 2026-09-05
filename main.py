@@ -8,7 +8,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from time import monotonic
@@ -20,6 +20,8 @@ from pymodbus.framer import FramerType
 from database import MySQLWriter
 from decoder import AggregatedMeasurement, Measurement, aggregate_measurements, decode_all_inputs
 from logging_utils import ConnectionState, RepeatSuppressor, SensorStateTracker
+from outbox import Outbox
+from postgres_database import PostgreSQLWriter
 
 ADDRESS = 0
 COUNT = 48
@@ -50,6 +52,18 @@ class AppConfig:
     mysql_charset: str
     mysql_collation: str
     mysql_connect_timeout: int
+    postgres_enabled: bool
+    postgres_host: str
+    postgres_port: int
+    postgres_database: str
+    postgres_user: str
+    postgres_password: str
+    postgres_connect_timeout: int
+    postgres_sslmode: str
+    postgres_source_system: str
+    postgres_metric_code: str
+    outbox_path: Path
+    outbox_batch_size: int
     log_level: str
     log_file: Path
     log_max_bytes: int
@@ -138,6 +152,17 @@ def load_config(config_path: Path) -> AppConfig:
         raise ConfigurationError("Некорректный параметр MYSQL_CHARSET: требуется latin1")
     if mysql_collation.lower() != "latin1_swedish_ci":
         raise ConfigurationError("Некорректный параметр MYSQL_COLLATION: требуется latin1_swedish_ci")
+    postgres_enabled = _bool(values, "POSTGRES_ENABLED", False)
+    postgres_database = _string(values, "POSTGRES_DATABASE", "telemetry")
+    postgres_user = _string(values, "POSTGRES_USER", "")
+    if postgres_enabled and (not postgres_database or not postgres_user):
+        raise ConfigurationError("Некорректные параметры POSTGRES_DATABASE и POSTGRES_USER: значения обязательны при POSTGRES_ENABLED=true")
+    postgres_port = _int(values, "POSTGRES_PORT", 5432, 1)
+    if postgres_port > 65535:
+        raise ConfigurationError("Некорректный параметр POSTGRES_PORT: значение вне диапазона")
+    outbox_path = Path(_string(values, "OUTBOX_PATH", "data/delivery-outbox.sqlite3"))
+    if not outbox_path.is_absolute():
+        outbox_path = absolute_path.parent / outbox_path
     return AppConfig(
         config_path=absolute_path,
         modbus_host=_required(values, "MODBUS_HOST"), modbus_port=modbus_port,
@@ -149,6 +174,16 @@ def load_config(config_path: Path) -> AppConfig:
         mysql_user=mysql_user, mysql_password=_string(values, "MYSQL_PASSWORD", ""),
         mysql_charset=mysql_charset, mysql_collation=mysql_collation,
         mysql_connect_timeout=_int(values, "MYSQL_CONNECT_TIMEOUT", 3, 1), log_level=_string(values, "LOG_LEVEL", "INFO").upper(),
+        postgres_enabled=postgres_enabled,
+        postgres_host=_string(values, "POSTGRES_HOST", "127.0.0.1"),
+        postgres_port=postgres_port, postgres_database=postgres_database,
+        postgres_user=postgres_user, postgres_password=_string(values, "POSTGRES_PASSWORD", ""),
+        postgres_connect_timeout=_int(values, "POSTGRES_CONNECT_TIMEOUT", 3, 1),
+        postgres_sslmode=_string(values, "POSTGRES_SSLMODE", "prefer"),
+        postgres_source_system=_string(values, "POSTGRES_SOURCE_SYSTEM", "PlantData"),
+        postgres_metric_code=_string(values, "POSTGRES_METRIC_CODE", "temperature"),
+        outbox_path=outbox_path,
+        outbox_batch_size=_int(values, "OUTBOX_BATCH_SIZE", 100, 1),
         log_file=log_file, log_max_bytes=_int(values, "LOG_MAX_BYTES", 10485760, 1),
         log_backup_count=_int(values, "LOG_BACKUP_COUNT", 10, 0),
         log_repeat_interval=_float(values, "LOG_REPEAT_INTERVAL", 300.0, 0.1),
@@ -253,6 +288,10 @@ def log_repeated(logger: logging.Logger, suppressor: RepeatSuppressor, key: str,
             logger.warning(message, *args)
 
 
+def redact_secret(message: str, secret: str) -> str:
+    return message.replace(secret, "***") if secret else message
+
+
 def measurements_from_registers(registers: list[int]) -> list[Measurement]:
     return decode_all_inputs(registers)
 
@@ -299,12 +338,60 @@ def create_mysql_writer(args: argparse.Namespace, config: AppConfig, logger: log
         logger.getChild("mysql").info("MySQL: подключено, сервер=%s:%s, база=%s", args.db_host, args.db_port, args.db_name)
         return MySQLWriter(connection)
     except Exception as exc:
+        logger.getChild("mysql").debug(
+            "Не удалось подключиться к MySQL: %s", redact_secret(str(exc), args.db_password or "")
+        )
         return None
+
+
+def create_postgres_writer(config: AppConfig, logger: logging.Logger) -> PostgreSQLWriter | None:
+    if not config.postgres_enabled:
+        return None
+    try:
+        import psycopg
+
+        connection = psycopg.connect(
+            host=config.postgres_host,
+            port=config.postgres_port,
+            dbname=config.postgres_database,
+            user=config.postgres_user,
+            password=config.postgres_password,
+            connect_timeout=config.postgres_connect_timeout,
+            sslmode=config.postgres_sslmode,
+        )
+        writer = PostgreSQLWriter(
+            connection,
+            source_system=config.postgres_source_system,
+            metric_code=config.postgres_metric_code,
+        )
+        writer.load_mapping()
+        logger.getChild("postgres").info(
+            "PostgreSQL: подключено, сервер=%s:%s, база=%s",
+            config.postgres_host, config.postgres_port, config.postgres_database,
+        )
+        return writer
+    except Exception as exc:
+        logger.getChild("postgres").debug(
+            "Не удалось подключиться к PostgreSQL: %s",
+            redact_secret(str(exc), config.postgres_password),
+        )
+        return None
+
+
+def deliver_pending(outbox: Outbox, target: str, writer, limit: int) -> int:
+    delivered = 0
+    for item in outbox.pending(target, limit):
+        measured = item["mysql_measured_at"] if target == "mysql" else item["measured_at_utc"]
+        writer.save_payload(item["measurements"], measured)
+        outbox.mark_sent(item["id"], target)
+        delivered += 1
+    return delivered
 
 
 def check_connections(args: argparse.Namespace, config: AppConfig, logger: logging.Logger) -> int:
     client = ModbusTcpClient(host=args.modbus_host, port=args.modbus_port, framer=FramerType.RTU, timeout=args.modbus_timeout)
     writer = None
+    postgres_writer = None
     try:
         if not client.connect():
             raise ConnectionError("Modbus-подключение не установлено")
@@ -317,6 +404,11 @@ def check_connections(args: argparse.Namespace, config: AppConfig, logger: loggi
             logger.getChild("mysql").error("Ошибка проверки подключения MySQL")
             return 1
         print("MySQL: подключение успешно" if writer is not None else "MySQL: проверка пропущена")
+        postgres_writer = create_postgres_writer(config, logger)
+        if config.postgres_enabled and postgres_writer is None:
+            logger.getChild("postgres").error("Ошибка проверки подключения PostgreSQL или справочников devices/metrics")
+            return 1
+        print("PostgreSQL: подключение успешно" if postgres_writer is not None else "PostgreSQL: проверка пропущена")
         return 0
     except Exception as exc:
         logger.exception("Ошибка проверки соединений: %s", exc)
@@ -325,17 +417,24 @@ def check_connections(args: argparse.Namespace, config: AppConfig, logger: loggi
         client.close()
         if writer is not None:
             writer.close()
+        if postgres_writer is not None:
+            postgres_writer.close()
 
 
 def monitor(args: argparse.Namespace, config: AppConfig, logger: logging.Logger, stop_event) -> None:
     client: ModbusTcpClient | None = None
     writer = None
+    postgres_writer = None
+    outbox = Outbox(config.outbox_path)
     modbus_failure = 0
     mysql_failure = 0
+    postgres_failure = 0
     next_mysql_attempt = 0.0
+    next_postgres_attempt = 0.0
     next_modbus_attempt = 0.0
     modbus_state = ConnectionState()
     mysql_state = ConnectionState()
+    postgres_state = ConnectionState()
     error_suppressor = RepeatSuppressor(config.log_repeat_interval)
     sensor_tracker = SensorStateTracker(config.active_sensors, logger.getChild("sensor"), args.debug)
     try:
@@ -379,10 +478,11 @@ def monitor(args: argparse.Namespace, config: AppConfig, logger: logging.Logger,
                     stop_event.wait(max(0.0, args.read_pause))
             if stop_event.is_set():
                 break
-            measured = datetime.now()
+            mysql_measured = datetime.now().replace(microsecond=0)
+            measured_utc = datetime.now(timezone.utc).replace(microsecond=0)
             measurements = aggregate_cycle(readings, args.max_spread)
             if args.debug:
-                logger.debug("Результат цикла: %s", format_measurements(measurements, measured).replace("\n", " | "))
+                logger.debug("Результат цикла: %s", format_measurements(measurements, mysql_measured).replace("\n", " | "))
             for index, item in enumerate(measurements, 1):
                 sensor_tracker.update(index, item.status, item.status_text)
                 if item.outlier:
@@ -390,6 +490,13 @@ def monitor(args: argparse.Namespace, config: AppConfig, logger: logging.Logger,
                     log_repeated(logger, error_suppressor, outlier_key, f"Вход {index}: отброшен выброс при сохранении медианы", debug=args.debug)
             now = monotonic()
             database_enabled = config.mysql_enabled if args.database is None else args.database
+            outbox.enqueue(
+                measurements,
+                measured_utc,
+                mysql_measured,
+                mysql_enabled=database_enabled,
+                postgres_enabled=config.postgres_enabled,
+            )
             if database_enabled:
                 if writer is None and now >= next_mysql_attempt:
                     writer = create_mysql_writer(args, config, logger)
@@ -408,15 +515,15 @@ def monitor(args: argparse.Namespace, config: AppConfig, logger: logging.Logger,
                             writer.close()
                             writer = None
                             raise ConnectionError("MySQL-соединение недоступно")
-                        status_count, log_count = writer.save_cycle(measurements, measured)
+                        delivered = deliver_pending(outbox, "mysql", writer, config.outbox_batch_size)
                         if args.debug:
-                            logger.debug("Успешная транзакция MySQL: sensor_status обновлено: %s, sensors_log добавлено: %s", status_count, log_count)
+                            logger.debug("MySQL: доставлено циклов из outbox: %s", delivered)
                     except Exception as exc:
                         failed_writer = writer
                         mysql_state.failed()
                         error_key = f"mysql:{type(exc).__name__}:{exc}"
                         if args.debug or error_suppressor.allow(error_key):
-                            logger.warning("Ошибка MySQL: %s", str(exc).replace(args.db_password or "", "***"))
+                            logger.warning("Ошибка MySQL: %s", redact_secret(str(exc), args.db_password or ""))
                         try:
                             if failed_writer is not None:
                                 failed_writer.connection.rollback()
@@ -427,6 +534,46 @@ def monitor(args: argparse.Namespace, config: AppConfig, logger: logging.Logger,
                         writer = None
                         mysql_failure += 1
                         next_mysql_attempt = now + RECONNECT_DELAYS[min(mysql_failure - 1, len(RECONNECT_DELAYS) - 1)]
+            if config.postgres_enabled:
+                if postgres_writer is None and now >= next_postgres_attempt:
+                    postgres_writer = create_postgres_writer(config, logger)
+                    if postgres_writer is None:
+                        postgres_failure += 1
+                        delay = RECONNECT_DELAYS[min(postgres_failure - 1, len(RECONNECT_DELAYS) - 1)]
+                        next_postgres_attempt = now + delay
+                        log_repeated(
+                            logger.getChild("postgres"), error_suppressor, "postgres:unavailable",
+                            f"Повторное подключение PostgreSQL через {delay} с", debug=args.debug,
+                        )
+                    else:
+                        postgres_failure = 0
+                        if postgres_state.connected():
+                            logger.getChild("postgres").info("Соединение PostgreSQL восстановлено")
+                if postgres_writer is not None:
+                    try:
+                        if not postgres_writer.is_connected():
+                            postgres_writer.close()
+                            postgres_writer = None
+                            raise ConnectionError("PostgreSQL-соединение недоступно")
+                        delivered = deliver_pending(
+                            outbox, "postgres", postgres_writer, config.outbox_batch_size,
+                        )
+                        if args.debug:
+                            logger.debug("PostgreSQL: доставлено циклов из outbox: %s", delivered)
+                    except Exception as exc:
+                        failed_writer = postgres_writer
+                        postgres_state.failed()
+                        error_key = f"postgres:{type(exc).__name__}:{exc}"
+                        if args.debug or error_suppressor.allow(error_key):
+                            safe_message = redact_secret(str(exc), config.postgres_password)
+                            logger.getChild("postgres").warning("Ошибка PostgreSQL: %s", safe_message)
+                        if failed_writer is not None:
+                            failed_writer.close()
+                        postgres_writer = None
+                        postgres_failure += 1
+                        next_postgres_attempt = now + RECONNECT_DELAYS[
+                            min(postgres_failure - 1, len(RECONNECT_DELAYS) - 1)
+                        ]
             stop_event.wait(max(0.0, args.poll_period))
     finally:
         if client is not None:
@@ -435,6 +582,10 @@ def monitor(args: argparse.Namespace, config: AppConfig, logger: logging.Logger,
         if writer is not None:
             writer.close()
             logger.getChild("mysql").info("Соединение MySQL закрыто")
+        if postgres_writer is not None:
+            postgres_writer.close()
+            logger.getChild("postgres").info("Соединение PostgreSQL закрыто")
+        outbox.close()
 
 
 def main(argv: list[str] | None = None) -> int:
