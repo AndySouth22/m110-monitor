@@ -1,5 +1,8 @@
 # Монитор ОВЕН МВ110-8А
 
+Полная схема PostgreSQL/TimescaleDB и описание общей архитектуры находятся в
+[`docs/data-architecture`](docs/data-architecture/README.md).
+
 Консольное приложение на Python 3.11+ для постоянного мониторинга всех восьми входов ОВЕН МВ110-8А по **Modbus RTU over TCP**. Используется `PyModbus` с `ModbusTcpClient` и `FramerType.RTU`: RTU-кадры с CRC передаются через TCP без MBAP-заголовка.
 
 ## Запуск
